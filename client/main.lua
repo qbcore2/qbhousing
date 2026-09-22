@@ -111,10 +111,57 @@ local function homeownerMenu()
     end
 end
 
+local APP_ID = 'qbhousing:real-estate'
+local dashboard
+local function listingItem(property)
+    local shell = property.interior and Config.shells[property.interior.name]
+    local entrance = property.interior and property.interior.entrance or {}
+    return { id = property.id, label = property.id, description = shell and ('SHELL · %s'):format(shell.label) or 'MLO',
+        metadata = {
+            { label = 'Price', value = money(property.listing and property.listing.price) },
+            { label = 'Location', value = ('%.2f, %.2f, %.2f'):format(tonumber(entrance.x) or 0, tonumber(entrance.y) or 0, tonumber(entrance.z) or 0) },
+        }, actions = {
+            { id = 'qbhousing:edit', label = 'Edit', icon = 'pencil' },
+            { id = 'qbhousing:remove', label = 'Remove', icon = 'trash-2', variant = 'destructive', confirm = 'Remove this property from the real estate inventory?' },
+        } }
+end
+
+local function realtorApp()
+    local data, err = QB.callback.trigger('qbhousing:realtorDashboard')
+    if not data then return notify(err or 'The real estate dashboard is unavailable.', 'error') end
+    dashboard = data
+    local listings, sold = {}, {}
+    for _, property in ipairs(data.forSale or {}) do listings[#listings + 1] = listingItem(property) end
+    for _, property in ipairs(data.sold or {}) do
+        local entrance = property.interior and property.interior.entrance or {}
+        sold[#sold + 1] = { id = property.id, label = property.id, description = property.interior.type:upper(), metadata = {
+            { label = 'Price', value = money(property.soldPrice or property.listing and property.listing.price) },
+            { label = 'Location', value = ('%.2f, %.2f, %.2f'):format(tonumber(entrance.x) or 0, tonumber(entrance.y) or 0, tonumber(entrance.z) or 0) },
+        } }
+    end
+    QB.nui.registerApp({ id = APP_ID, title = 'Real Estate', description = 'Property management', icon = 'building-2', width = 1180, height = 760,
+        defaultView = 'home', navigation = {
+            { id = 'home', label = 'Home', icon = 'house', content = { title = 'Portfolio overview', blocks = { { type = 'stats', items = {
+                { label = 'For Sale', value = #listings, icon = 'tags', tone = 'primary' }, { label = 'Overall Sold', value = data.soldCount or 0, icon = 'badge-check', tone = 'success' }, { label = 'Average Price', value = money(data.averagePrice), icon = 'chart-no-axes-combined', tone = 'warning' }, } } } } },
+            { id = 'sale', label = 'For Sale', icon = 'tags', content = { title = 'Active listings', blocks = { { type = 'list', items = listings, empty = 'No Properties For Sale' } } } },
+            { id = 'new', label = 'New House', icon = 'plus', content = { title = 'New House', description = 'Create a property listing with the guided creator.', actions = { { id = 'qbhousing:new', label = 'Open property creator', icon = 'plus', variant = 'primary' } }, blocks = { { type = 'empty', title = 'Property creator', description = 'Choose MLO or Shell, then place the entrance and garage in the world.' } } } },
+            { id = 'sold', label = 'Sold Houses', icon = 'badge-check', content = { title = 'Sold property history', blocks = { { type = 'list', items = sold, empty = 'No Sold Properties' } } } },
+        }, onAction = function(action, context)
+            local property = Properties[context and (context.id or context.itemId)]
+            if action == 'qbhousing:new' then QB.nui.closeApp(APP_ID); createProperty()
+            elseif action == 'qbhousing:edit' and property then QB.nui.closeApp(APP_ID); createProperty(property)
+            elseif action == 'qbhousing:remove' and property then
+                local ok, removeErr = QB.callback.trigger('qbhousing:removeProperty', property.id)
+                notify(ok and 'Property removed.' or removeErr or 'Property could not be removed.', ok and 'success' or 'error')
+                if ok then realtorApp() end
+            end
+        end })
+    QB.nui.openApp(APP_ID)
+end
+
 RegisterCommand(Config.command, function()
-    if Me.realtor then
-        local choice = QB.nui.openMenu({{ id = 'create', label = 'Create property', icon = 'plus' }, { id = 'market', label = 'Open market', icon = 'building' }, { id = 'homes', label = 'My homes', icon = 'house' }}, 'Real estate')
-        if choice and choice.selectedId == 'create' then createProperty() elseif choice and choice.selectedId == 'market' then openMarket() elseif choice and choice.selectedId == 'homes' then homeownerMenu() end
+    local player = exports.qbcore:getPlayer()
+    if player and player.job and player.job.name == Config.realtorJob then realtorApp()
     else openMarket() end
 end, false)
 

@@ -61,7 +61,6 @@ register('saveProperty', function(src, payload)
     else
         local price = math.floor(tonumber(property.listing.price) or 0)
         if price < 1 then return fail('MLO price must be positive.') end
-        if not property.exterior or type(property.exterior.polyzone) ~= 'table' or #property.exterior.polyzone < 3 then return fail('MLO properties require an outside zone.') end
     end
     if not property.garage or type(property.garage.coords) ~= 'table' or type(property.garage.spawn) ~= 'table' then return fail('A garage and vehicle spawn are required.') end
     property.owner = existing and existing.owner or nil
@@ -78,6 +77,31 @@ register('catalog', function(src)
         if property.state == 'listed' and property.listing then result[#result + 1] = property end
     end
     return result
+end)
+
+register('realtorDashboard', function(src)
+    if not isRealtor(src) then return fail('Only realtors can view the dashboard.') end
+    local result, total, count = { forSale = {}, sold = {}, averagePrice = 0, soldCount = 0 }, 0, 0
+    for _, property in pairs(State.properties) do
+        if property.state == 'listed' and property.listing then
+            result.forSale[#result.forSale + 1] = property
+            total, count = total + (tonumber(property.listing.price) or 0), count + 1
+        end
+        if property.soldAt then result.sold[#result.sold + 1] = property; result.soldCount = result.soldCount + 1 end
+    end
+    result.averagePrice = count > 0 and math.floor(total / count) or 0
+    return result
+end)
+
+register('removeProperty', function(src, id)
+    if not isRealtor(src) then return fail('Only realtors can remove properties.') end
+    local property = State.get(id)
+    if not property or property.owner then return fail('Owned properties cannot be removed.') end
+    local ok, err = QB.sql.execute('DELETE FROM `qbhousing_properties` WHERE `id` = ?', { id })
+    if not ok then return fail(err or 'Property could not be removed.') end
+    State.properties[id] = nil
+    State.broadcast()
+    return true
 end)
 
 register('offer', function(src, id, buyer)
@@ -110,6 +134,7 @@ register('confirmPurchase', function(src, id)
     local sellerFee = math.floor(amount * Config.sellerCommission)
     local proceeds = amount - society - sellerFee
     property.owner, property.keys, property.state, property.pending = cid, {}, 'owned', nil
+    property.soldAt, property.soldPrice = os.time(), amount
     if not exports.qbcore:removeMoney(src, 'bank', amount, 'Property purchase', true) then return fail('Payment failed; no changes were made.') end
     local ok, err = QB.sql.transaction({
         { sql = 'UPDATE `qbhousing_properties` SET `owner` = ?, `definition` = ? WHERE `id` = ?', params = { cid, json.encode(property), property.id } },
