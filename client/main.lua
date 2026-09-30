@@ -189,8 +189,9 @@ CreateThread(function()
         if not currentProperty then Wait(1000) goto continue end
         Wait(0)
         local exit = currentProperty.interior.exit
+        local origin = currentProperty.interior.entrance
         local coords = GetEntityCoords(PlayerPedId())
-        local distance = #(coords - vector3(exit.x, exit.y, exit.z))
+        local distance = #(coords - vector3(origin.x + (exit.x or 0.0), origin.y + (exit.y or 0.0), origin.z + (exit.z or 0.0)))
         if distance < 1.5 then
             leavePrompt = leavePrompt or QB.textui.show('Leave property', { key = 'E' })
             if IsControlJustReleased(0, 38) then
