@@ -1,5 +1,7 @@
 local State = Housing.state
 local RESOURCE = GetCurrentResourceName()
+-- Keep writes to one property from crossing while the database call yields.
+local propertyWrites = {}
 
 local function player(src) return exports.qbcore:getPlayer(src) end
 local function citizenId(src) local data = player(src); return data and data.citizenid end
@@ -45,6 +47,7 @@ register('saveProperty', function(src, payload)
     local property = Housing.copy(payload)
     property.id = type(property.id) == 'string' and property.id:gsub('[^%w_-]', '') or ''
     if property.id == '' or #property.id > 64 then return fail('Use a valid property id.') end
+    if propertyWrites[property.id] then return fail('This property is being updated. Please try again.') end
     local existing = State.get(property.id)
     if existing and not canManage(src, existing) then return fail('You cannot edit this property.') end
     property.listing = property.listing or {}
@@ -65,7 +68,9 @@ register('saveProperty', function(src, payload)
     if not property.garage or type(property.garage.coords) ~= 'table' or type(property.garage.spawn) ~= 'table' then return fail('A garage and vehicle spawn are required.') end
     property.owner = existing and existing.owner or nil
     property.state = property.owner and 'owned' or 'listed'
+    propertyWrites[property.id] = true
     local saved, err = State.persist(property)
+    propertyWrites[property.id] = nil
     if not saved then return fail(err or 'Property could not be saved.') end
     State.broadcast()
     return saved
@@ -95,9 +100,12 @@ end)
 
 register('removeProperty', function(src, id)
     if not isRealtor(src) then return fail('Only realtors can remove properties.') end
+    if propertyWrites[id] then return fail('This property is being updated. Please try again.') end
     local property = State.get(id)
     if not property or property.owner then return fail('Owned properties cannot be removed.') end
+    propertyWrites[id] = true
     local ok, err = QB.sql.execute('DELETE FROM `qbhousing_properties` WHERE `id` = ?', { id })
+    propertyWrites[id] = nil
     if not ok then return fail(err or 'Property could not be removed.') end
     State.properties[id] = nil
     State.broadcast()
@@ -105,6 +113,7 @@ register('removeProperty', function(src, id)
 end)
 
 register('offer', function(src, id, buyer)
+    if propertyWrites[id] then return fail('This property is being updated. Please try again.') end
     local property = State.get(id)
     if not property or property.state ~= 'listed' or not property.listing then return fail('This property is not available.') end
     local cid = citizenId(src)
@@ -113,8 +122,10 @@ register('offer', function(src, id, buyer)
         local target = exports.qbcore:getPlayerByCitizenId(buyer)
         if not target then return fail('The buyer must be online for a direct offer.') end
     end
+    propertyWrites[id] = true
     property.pending = { buyer = buyer or cid, realtor = property.listing.realtor, expires = os.time() + 300 }
     local saved, err = State.persist(property)
+    propertyWrites[id] = nil
     if not saved then return fail(err) end
     local target = exports.qbcore:getPlayerByCitizenId(property.pending.buyer)
     if target and target.source then TriggerClientEvent('qbhousing:client:purchaseOffer', target.source, saved) end
@@ -122,6 +133,7 @@ register('offer', function(src, id, buyer)
 end)
 
 register('confirmPurchase', function(src, id)
+    if propertyWrites[id] then return fail('This property is being updated. Please try again.') end
     local property = State.get(id)
     local cid = citizenId(src)
     if not property or property.state ~= 'listed' or not property.pending or property.pending.buyer ~= cid then return fail('This purchase offer is no longer valid.') end
@@ -129,20 +141,25 @@ register('confirmPurchase', function(src, id)
     local amount = math.floor(tonumber(property.listing.price) or 0)
     local buyer = player(src)
     if not buyer or tonumber(buyer.money and buyer.money.bank) < amount then return fail('You do not have enough money in the bank.') end
+    property = Housing.copy(property)
     local oldOwner = property.owner
     local society = math.floor(amount * Config.societyCommission)
     local sellerFee = math.floor(amount * Config.sellerCommission)
     local proceeds = amount - society - sellerFee
     property.owner, property.keys, property.state, property.pending = cid, {}, 'owned', nil
     property.soldAt, property.soldPrice = os.time(), amount
-    if not exports.qbcore:removeMoney(src, 'bank', amount, 'Property purchase', true) then return fail('Payment failed; no changes were made.') end
-    local ok, err = QB.sql.transaction({
-        { sql = 'UPDATE `qbhousing_properties` SET `owner` = ?, `definition` = ? WHERE `id` = ?', params = { cid, json.encode(property), property.id } },
-    })
-    if not ok then
+    propertyWrites[id] = true
+    if not exports.qbcore:removeMoney(src, 'bank', amount, 'Property purchase', true) then
+        propertyWrites[id] = nil
+        return fail('Payment failed; no changes were made.')
+    end
+    local saved, err = State.persist(property)
+    if not saved then
         exports.qbcore:addMoney(src, 'bank', amount, 'Property purchase rollback', true)
+        propertyWrites[id] = nil
         return fail(err or 'The purchase could not be completed.')
     end
+    propertyWrites[id] = nil
     if Config.societyAccount ~= '' then exports.qbbanking:AddMoney(Config.societyAccount, society, 'Real-estate society commission') end
     if oldOwner then
         local ownerSource = exports.qbcore:getPlayerByCitizenId(oldOwner)
@@ -152,31 +169,40 @@ register('confirmPurchase', function(src, id)
             if offline and offline.Functions then offline.Functions.AddMoney('bank', proceeds, 'Property sale proceeds') end
         end
     end
-    local saved = State.persist(property)
     State.broadcast()
-    return saved or true
+    return saved
 end)
 
 register('keys', function(src, id, action, targetCid)
+    if propertyWrites[id] then return fail('This property is being updated. Please try again.') end
     local property = State.get(id)
     if not property or property.owner ~= citizenId(src) then return fail('Only the homeowner can manage keys.') end
     if type(targetCid) ~= 'string' or #targetCid < 3 or #targetCid > 50 or targetCid == property.owner then return fail('Invalid keyholder.') end
+    if action ~= 'give' and action ~= 'remove' then return fail('Invalid key action.') end
+    propertyWrites[id] = true
     property.keys = property.keys or {}
-    if action == 'give' then property.keys[targetCid] = true elseif action == 'remove' then property.keys[targetCid] = nil else return fail('Invalid key action.') end
+    if action == 'give' then property.keys[targetCid] = true else property.keys[targetCid] = nil end
     local saved, err = State.persist(property)
+    propertyWrites[id] = nil
     if not saved then return fail(err) end
     State.broadcast()
     return saved.keys
 end)
 
 register('update', function(src, id, field, value)
+    if propertyWrites[id] then return fail('This property is being updated. Please try again.') end
     local property = State.get(id)
     if not property or property.owner ~= citizenId(src) then return fail('Only the homeowner can manage this property.') end
+    propertyWrites[id] = true
     if field == 'furniture' and type(value) == 'table' and #value <= Config.maxFurniture then property.furniture = value
     elseif field == 'stashes' and type(value) == 'table' and #value <= Config.maxStashes then property.stashes = value
     elseif field == 'clothing' and type(value) == 'table' and #value <= Config.maxClothingSpots then property.clothing = value
-    else return fail('Invalid property update.') end
+    else
+        propertyWrites[id] = nil
+        return fail('Invalid property update.')
+    end
     local saved, err = State.persist(property)
+    propertyWrites[id] = nil
     if not saved then return fail(err) end
     State.broadcast()
     return saved
