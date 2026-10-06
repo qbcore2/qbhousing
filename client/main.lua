@@ -2,6 +2,14 @@ local Properties, Me = {}, {}
 local shellObjects, currentProperty = {}, nil
 local leavePrompt
 
+local function removeShell()
+    for _, object in ipairs(shellObjects) do
+        if DoesEntityExist(object) then DeleteEntity(object) end
+    end
+    shellObjects, currentProperty = {}, nil
+    if leavePrompt then QB.textui.hide(leavePrompt); leavePrompt = nil end
+end
+
 local function notify(message, kind) QB.notify.send({ title = 'Housing', message = message, type = kind or 'inform' }) end
 local function money(value) return ('$%s'):format(('%.0f'):format(tonumber(value) or 0)) end
 
@@ -196,10 +204,8 @@ CreateThread(function()
             leavePrompt = leavePrompt or QB.textui.show('Leave property', { key = 'E' })
             if IsControlJustReleased(0, 38) then
                 local entrance = currentProperty.interior.entrance
-                for _, object in ipairs(shellObjects) do if DoesEntityExist(object) then DeleteEntity(object) end end
-                shellObjects, currentProperty = {}, nil
+                removeShell()
                 if entrance then SetEntityCoords(PlayerPedId(), entrance.x, entrance.y, entrance.z, false, false, false, false) end
-                if leavePrompt then QB.textui.hide(leavePrompt); leavePrompt = nil end
             end
         elseif leavePrompt then QB.textui.hide(leavePrompt); leavePrompt = nil end
         ::continue::
@@ -208,3 +214,8 @@ end)
 
 CreateThread(function() Wait(1000); hydrate() end)
 AddEventHandler('QBCore:Client:OnPlayerLoaded', hydrate)
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    removeShell()
+end)
