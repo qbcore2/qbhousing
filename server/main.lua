@@ -165,8 +165,7 @@ register('confirmPurchase', function(src, id)
         local ownerSource = exports.qbcore:getPlayerByCitizenId(oldOwner)
         if ownerSource then exports.qbcore:addMoney(ownerSource.source, 'bank', proceeds, 'Property sale proceeds', true)
         else
-            local offline = exports['qb-core']:GetOfflinePlayerByCitizenId(oldOwner)
-            if offline and offline.Functions then offline.Functions.AddMoney('bank', proceeds, 'Property sale proceeds') end
+            exports.qbcore:addOfflineMoney(oldOwner, 'bank', proceeds)
         end
     end
     State.broadcast()
